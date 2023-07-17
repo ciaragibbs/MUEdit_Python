@@ -713,7 +713,8 @@ def remove_duplicates_between_arrays(pulse_trains, discharge_times, muscle, maxl
         muscle = np.delete(muscle, duplicates, axis=0)
 
         i += 1
-
+    muscle_new = np.array(muscle_new)
+    pulse_trains_new = np.array(pulse_trains_new)
     print('Duplicates across arrays removed')
     return discharge_times_new, pulse_trains_new, muscle_new
   

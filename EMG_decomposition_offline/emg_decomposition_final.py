@@ -623,18 +623,18 @@ class offline_EMG(EMG):
         self.mu_dict["pulse_trains"] = []
 
         for i in range(no_arrays):
+
+            if i != 0:
+                self.mu_dict['discharge_times'].append([])
             
             idx = np.where(muscle_new == i)[0] # find the indices for mu -> array mapping
             self.mu_dict["pulse_trains"].append(pulse_trains_new[idx])
             for j in range(np.shape(self.mu_dict["pulse_trains"][i])[0]):
 
-                if i != 0:
-                    self.mu_dict['discharge_times'].append([])
-                
-                self.mu_dict["discharge_times"][i].append(discharge_times_new[j])
+                self.mu_dict["discharge_times"][i].append(discharge_times_new[idx[j]])
 
 
-        print('hi')
+        self.mu_dict["muscle"] = muscle_new
         print('Processing across grids complete')
 
         

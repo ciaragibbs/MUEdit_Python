@@ -74,7 +74,7 @@ for i in range(1): #range(len(all_files)):
             
     if emg_obj.dup_bgrids and sum(emg_obj.mus_in_array) > 0:
         
-        emg_obj.post_process_across_arrays()
+         emg_obj.post_process_across_arrays()
     
     
     print('Completed processing of the recorded EMG signal')
