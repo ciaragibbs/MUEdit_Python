@@ -33,7 +33,7 @@ for i in range(1): #range(len(all_files)):
     emg_obj.signal_dict['diff_data'] = []
     tracker = 0
     nwins = int(len(emg_obj.plateau_coords)/2)
-    for g in range(int(emg_obj.signal_dict['ngrids'])):
+    for g in range(2): #range(int(emg_obj.signal_dict['ngrids'])):
 
             extension_factor = int(np.round(emg_obj.ext_factor/np.shape(emg_obj.signal_dict['batched_data'][tracker])[0]))
             # these two arrays are holding extended emg data PRIOR to the removal of edges
@@ -71,9 +71,13 @@ for i in range(1): #range(len(all_files)):
     ##################### POSTPROCESSING #################################
             
             emg_obj.post_process_EMG(g)
+            
+    if emg_obj.dup_bgrids and sum(emg_obj.mus_in_array) > 0:
+        
+        emg_obj.post_process_across_arrays()
     
-    print('hi')
-    print('Complete processing of the recorded EMG signal')
+    
+    print('Completed processing of the recorded EMG signal')
 
 
             

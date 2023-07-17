@@ -14,7 +14,7 @@ np.random.seed(1337) # Fixes random generation to get same results each time the
 class EMG():
 
     def __init__(self):
-        self.its = 100 # number of iterations of the fixed point algorithm 
+        self.its = 20 # number of iterations of the fixed point algorithm 
         self.ref_exist = 1 # if ref_signal exist ref_exist = 1; if not ref_exist = 0 and manual selection of windows
         self.windows = 1  # number of segmented windows over each contraction
         self.check_emg = 1 # 0 = Automatic selection of EMG channels (remove 5% of channels) ; 1 = Visual checking
@@ -31,6 +31,7 @@ class EMG():
         self.cov_filter = 1
         self.dup_thr = 0.3 # Correlation threshold for defining a pair of spike trains as derived from the same MU, hence a duplicate
         self.refine_mu = 1
+        self.dup_bgrids = 1
 #######################################################################################################
 ########################################## OFFLINE EMG ################################################
 #######################################################################################################
@@ -559,13 +560,15 @@ class offline_EMG(EMG):
 
     def post_process_EMG(self,grid):
 
-       
+        self.mus_in_array = np.zeros(self.signal_dict['ngrids'])
         grid += 1
         # batch processing over each window
         pulse_trains, discharge_times = batch_process_filters(self.decomp_dict['whitened_obvs'],self.decomp_dict['masked_mu_filters'],self.plateau_coords,self.ext_number,self.differential_mode,np.shape(self.signal_dict['data'])[1],self.signal_dict['fsamp'])
 
         
         if np.shape(pulse_trains)[0] > 0: # if there are existing MUs
+            
+            self.mus_in_array[grid-1] = 1 # if pulse trains were not extracted for this grid, then it remains at a value of 0
             # removing duplicate MUs
             discharge_times_new, pulse_trains_new =  remove_duplicates(pulse_trains, discharge_times,discharge_times,np.round(self.signal_dict['fsamp']/40),0.00025, self.dup_thr, self.signal_dict['fsamp'])
 
@@ -585,6 +588,59 @@ class offline_EMG(EMG):
         for j in range(len(discharge_times_new)):
 
             self.mu_dict['discharge_times'][grid-1].append(discharge_times_new[j])
+
+    def post_process_across_arrays(self):
+
+        mu_count = 0
+        no_arrays = np.shape(self.mu_dict['pulse_trains'])[0]
+        for i in range(no_arrays):
+
+            if self.mu_dict['pulse_trains'][i].size: # if the np.array for a given grid/needle is not empty, continue with post-processing
+                mu_count += np.shape(self.mu_dict['pulse_trains'][i])[0]
+
+        all_pulse_trains = np.zeros([mu_count, np.shape(self.signal_dict['target'])[0]])
+        all_discharge_times = [] # different mus will have discharge time arrays of different lengths
+        muscle = np.zeros(mu_count,dtype=int)
+
+        mu = 0
+
+        for i in range(no_arrays): # iterating over arrays
+             if self.mu_dict['pulse_trains'][i].size:
+                 for j in range(np.shape(self.mu_dict['pulse_trains'][i])[0]): # iterating over the mus per array
+
+                    all_pulse_trains[mu,:] = self.mu_dict['pulse_trains'][i][j]
+                    all_discharge_times.append(self.mu_dict['discharge_times'][i][j])
+                    muscle[mu] = i
+                    mu += 1
+
+        discharge_times_new, pulse_trains_new, muscle_new = remove_duplicates_between_arrays(all_pulse_trains, all_discharge_times, muscle, np.round(self.signal_dict['fsamp']/40),0.00025, self.dup_thr, self.signal_dict['fsamp'])
+
+        # now that duplicates are removed across arrays, use the muscle variable to regroup the mus back into their respective grids (or wherever they had the lowest ISI)
+
+        del self.mu_dict["discharge_times"]
+        self.mu_dict["discharge_times"] = [[]] # empty nested list
+        del self.mu_dict["pulse_trains"]
+        self.mu_dict["pulse_trains"] = []
+
+        for i in range(no_arrays):
+            
+            idx = np.where(muscle_new == i)[0] # find the indices for mu -> array mapping
+            self.mu_dict["pulse_trains"].append(pulse_trains_new[idx])
+            for j in range(np.shape(self.mu_dict["pulse_trains"][i])[0]):
+
+                if i != 0:
+                    self.mu_dict['discharge_times'].append([])
+                
+                self.mu_dict["discharge_times"][i].append(discharge_times_new[j])
+
+
+        print('hi')
+        print('Processing across grids complete')
+
+        
+
+        
+    
 
             
             

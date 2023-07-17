@@ -619,6 +619,130 @@ def remove_outliers(pulse_trains, discharge_times, fsamp, threshold = 0.4, max_i
     return discharge_times
 
 
+def remove_duplicates_between_arrays(pulse_trains, discharge_times, muscle, maxlag, jitter_val, tol, fsamp):
+
+    jitter_thr = int(np.round(jitter_val*fsamp))
+    spike_trains = np.zeros([np.shape(pulse_trains)[0],np.shape(pulse_trains)[1]])
+    
+    discharge_jits = []
+    discharge_times_new = [] # do not know yet how many non-duplicates MUs there will be
+    pulse_trains_new = [] # do not know yet how many non-duplicates MUs there will be
+    muscle_new = []
+
+    # generating binary spike trains for each MU extracted so far
+    for i in range(np.shape(pulse_trains)[0]):
+
+        spike_trains[i,discharge_times[i]] = 1
+        discharge_jits.append([]) # append an empty list to be extended with jitters
+        # adding jitter
+        for j in range(jitter_thr):
+            discharge_jits[i].extend(discharge_times[i]-j)
+            discharge_jits[i].extend(discharge_times[i]+j) # adding varying extents of jitter, based on computed jitter threshold
+
+        discharge_jits[i].extend(discharge_times[i])
+
+    mu_count = np.shape(discharge_times)[0] # the total number of MUs extracted so far
+
+    i = 1
+    # With the binary trains generated above, you can readily identify duplicate MUs
+    while discharge_jits:
+        
+        discharge_temp = []
+        for mu_candidate in range(np.shape(discharge_jits)[0]):
+
+            # in matlab: [c, lags] = xcorr(firings(1,:), firings(j,:), maxlag*2,'normalized')
+            # calculating the cross correlation between the firings of two cnadidate MUs, within a limited range of maxlag*2
+            # then, normalise the resulting correlation values between 0 and 1
+
+            corr, lags = xcorr(spike_trains[0,:], spike_trains[mu_candidate,:],int(maxlag))
+            ind_max = np.argmax(corr)
+            corr_max = np.real(corr[ind_max])
+
+            if corr_max > 0.2:
+                discharge_temp.append(discharge_jits[mu_candidate] + lags[ind_max])
+            else:
+                discharge_temp.append(discharge_jits[mu_candidate])
+
+
+        # discharge_temp is the lag-shifted version of discharge_jits if the correlation is sufficiently large
+        # so if they are quite misaligned in time, we shift them to be aligned, ready to maximise the count of the common discharges
+        # otherwise, we assume their temporal alignment is okay enough to just go ahead and count common discharges below
+        
+        # Now, we count the common discharge times
+        comdis = np.zeros(np.shape(pulse_trains)[0])
+        
+        for j in range(1, np.shape(pulse_trains)[0]): # skip the first since it is used for the baseline comparison   
+            com = np.intersect1d(discharge_jits[0], discharge_temp[j])
+            com = com[np.insert(np.diff(com) != 1, 0, False)] # shouldn't this be based on the jitter threshold
+            comdis[j] = len(com) / max(len(discharge_times[0]), len(discharge_times[j]))
+            com = None
+
+        # now left with an array of common discharges
+        # use this establish the duplicate MUs, and keep only the MU that has the most stable, regular firing behaviour i.e. low ISI
+        
+        duplicates = np.where(comdis >= tol)[0]
+        duplicates = np.insert(duplicates, 0, 0) # insert 
+        CoV = np.zeros(len(duplicates))
+        
+        for j in range(len(duplicates)):
+            ISI = np.diff(discharge_times[duplicates[j]])
+            CoV[j] = np.std(ISI) / np.mean(ISI)
+
+        survivor = np.argmin(CoV) # the surviving MU has the lowest CoV
+
+        # delete all duplicates, but save the surviving MU
+        discharge_times_new.append(discharge_times[duplicates[survivor]])
+        pulse_trains_new.append(pulse_trains[duplicates[survivor]])
+        muscle_new.append(muscle[duplicates[survivor]])
+
+        # update firings and discharge times
+
+        for j in range(len(duplicates)):
+
+            discharge_times[duplicates[-(j+1)]] = []
+            discharge_jits[duplicates[-(j+1)]] = []
+
+        # if it is not empty, assign it back to the list, otherwise remove the empty element i.e. only keep the non duplicate MUs that were not emptied in previous loop
+        discharge_times = [mu for mu in discharge_times if len(mu) > 0] 
+        discharge_jits = [mu for mu in discharge_jits if len(mu) > 0]
+
+        # Clean the spike and pulse train arrays based on identificed duplicates
+        # all duplicates removed so we identify different duplicate groups on the next iteration of the while loop
+        spike_trains = np.delete(spike_trains, duplicates, axis=0)
+        pulse_trains = np.delete(pulse_trains, duplicates, axis=0)
+        muscle = np.delete(muscle, duplicates, axis=0)
+
+        i += 1
+
+    print('Duplicates across arrays removed')
+    return discharge_times_new, pulse_trains_new, muscle_new
+  
+
+def remove_outliers(pulse_trains, discharge_times, fsamp, threshold = 0.4, max_its = 30):
+
+    for mu in range(np.shape(discharge_times)[0]):
+
+        discharge_rates = 1/(np.diff(discharge_times[mu]) / fsamp)
+        it = 1
+        while (np.std(discharge_rates)/np.mean(discharge_rates)) > threshold and it < max_its:
+
+            artifact_limit = np.mean(discharge_rates) + 3*np.std(discharge_rates)
+            # identify the indices for which this limit is exceeded
+            artifact_inds = np.squeeze(np.argwhere(discharge_rates > artifact_limit))
+            if len(artifact_inds) > 0:
+
+                # vectorising the comparisons between the numerator terms used to calculate the rate, for indices at rate artifacts
+                diff_artifact_comp = pulse_trains[mu][discharge_times[mu][artifact_inds]] < pulse_trains[mu][discharge_times[mu][artifact_inds + 1]]
+                # 0 means discharge_times[mu][artifact_inds]] was less, 1 means discharge_times[mu][artifact_inds]] was more
+                less_or_more = np.argmax([diff_artifact_comp, ~diff_artifact_comp], axis=0)
+                discharge_times[mu] = np.delete(discharge_times[mu], artifact_inds + less_or_more)
+            
+            discharge_rates = 1/(np.diff(discharge_times[mu]) / fsamp)
+            it += 1
+ 
+    return discharge_times
+
+
 
 def refine_mus(signal,signal_mask, pulse_trains_n_1, discharge_times_n_1, fsamp):
 
