@@ -230,7 +230,8 @@ def exp(x):
 
 @numba.njit
 def logcosh(x):
-    return np.log(np.cosh(x))
+    return np.tanh(x)
+    #return np.log(np.cosh(x))
 
 @numba.njit
 def dot_square(x):
@@ -246,8 +247,16 @@ def dot_exp(x):
 
 @numba.njit
 def dot_logcosh(x):
-    return np.tanh(x)
+    return 1 - np.square(np.tanh(x))
+    #return np.tanh(x)
 
+"""
+def _logcosh(da, xp, x):
+    # As opposed to scikit-learn here we fix alpha = 1 and we vectorize the derivation
+    gx = da.tanh(x, x)  # apply the tanh inplace
+    g_x = (1 - gx ** 2).mean(axis=-1)
+    return gx, g_x
+"""
 
 @numba.njit(fastmath=True)
 def fixed_point_alg(w_n, B, Z,cf, dot_cf, its = 500):
@@ -266,7 +275,6 @@ def fixed_point_alg(w_n, B, Z,cf, dot_cf, its = 500):
     assert Z.ndim == 2
     assert w_n.ndim == 1
     assert its in [500]
-
     counter = 0
     its_tolerance = 0.0001
     sep_diff = np.ones(its)
@@ -290,7 +298,7 @@ def fixed_point_alg(w_n, B, Z,cf, dot_cf, its = 500):
         w_n /= np.linalg.norm(w_n)
         counter += 1
         sep_diff[counter] = np.abs(w_n @ w_n_1 - 1)
-
+        #print(counter)
     return w_n
 
 def get_spikes(w_n,Z, fsamp):
@@ -456,6 +464,128 @@ def cutMUAP(MUPulses, length, Y):
     return MUAPs
 
 
+# FOR POST PROCESSING WHEN COMBINING WITH BIOFEEDBACK
+def get_pulse_trains(data, rejected_channels, mu_filters, chans_per_grid, fsamp,g):
+     
+    # channel rejection again, but on the PRE-FILTERED data
+    # OR: if filtering was not used in the pre processing, the batched data could be used (?)
+    data_slice = data[chans_per_grid[g]*(g):(g+1)* chans_per_grid[g],:] # will need to be generalised
+    rejected_channels_slice = rejected_channels[g] == 1
+    cleaned_data = np.delete(data_slice, rejected_channels_slice, 0)
+
+    # get the first estimate of pulse trains using the previously derived mu filters, applied to the emg data
+    ext_factor = int(np.round(1500/np.shape(cleaned_data)[0]))
+    extended_data = np.zeros([1, np.shape(cleaned_data)[0]*(ext_factor), np.shape(cleaned_data)[1] + ext_factor -1]) # no differential mode used here (?)
+    extended_data =  extend_emg(extended_data,cleaned_data,ext_factor)
+
+    # get the real and inverted versions
+    sq_extended_data = (extended_data @ extended_data.T)/np.shape(extended_data)[1]
+    inv_extended_data = np.linalg.pinv(extended_data)
+    
+    # initialisations for extracting pulse trains in clustering
+    mu_count =  np.shape(mu_filters)[1]
+    pulse_trains = np.zeros([mu_count, np.shape(data)[1]]) 
+    discharge_times = [None] * mu_count # do not know size yet, so can only predefine as a list
+    
+    for mu in range(mu_count):
+
+        pulse_temp = (mu_filters[:,mu].T @ inv_extended_data) @ extended_data # what does this do?
+        # step 4a 
+        pulse_trains[mu,:] = pulse_temp[:np.shape(data)[1]]
+        # source_pred = np.dot(np.transpose(w_n), Z).real # element-wise square of the input to estimate the ith source
+        pulse_trains[mu,:] = np.multiply(pulse_trains[mu,:],abs(pulse_trains[mu,:])) # keep the negatives 
+        # Step 4b:
+        peaks, _ = scipy.signal.find_peaks(np.squeeze(pulse_trains[mu,:]), distance = np.round(fsamp*0.02)+1) # peaks variable holds the indices of all peaks
+        pulse_trains[mu,:] /=  np.mean(maxk(pulse_trains[mu,peaks], 10))
+    
+        if len(peaks) > 1:
+
+            kmeans = KMeans(n_clusters = 2, init = 'k-means++',n_init = 1).fit(pulse_trains[mu,peaks].reshape(-1,1)) # two classes: 1) spikes 2) noise
+            spikes_ind = np.argmax(kmeans.cluster_centers_)
+            spikes = peaks[np.where(kmeans.labels_ == spikes_ind)]
+            # remove outliers from the spikes cluster with a std-based threshold
+            discharge_times[mu] = spikes[pulse_trains[mu,spikes] <= np.mean(pulse_trains[mu,spikes]) + 3*np.std(pulse_trains[mu,spikes])]
+        else:
+            discharge_times[mu] = peaks
+
+    return pulse_trains, discharge_times, ext_factor
+
+
+def get_mu_filters(data,rejected_channels, discharge_times, chans_per_grid, g):
+
+    # channel rejection again, but on the PRE-FILTERED data
+    # OR: if filtering was not used in the pre processing, the batched data could be used (?)
+    data_slice = data[chans_per_grid[g]*(g):(g+1)* chans_per_grid[g],:] # will need to be generalised
+    rejected_channels_slice = rejected_channels[g] == 1
+    cleaned_data = np.delete(data_slice, rejected_channels_slice, 0)
+
+    # get the first estimate of pulse trains using the previously derived mu filters, applied to the emg data
+    ext_factor = int(np.round(1500/np.shape(cleaned_data)[0]))
+    extended_data = np.zeros([1, np.shape(cleaned_data)[0]*(ext_factor), np.shape(cleaned_data)[1] + ext_factor -1]) # no differential mode used here (?)
+    extended_data =  extend_emg(extended_data,cleaned_data,ext_factor)
+
+    # recalculate MU filters
+    mu_filters = np.zeros(np.shape(extended_data)[0],np.shape(discharge_times)[1]) # need to check that np.shape(discharge_times)[1] is equiv to no. motor units
+    for mu in range(np.shape(discharge_times)[1]):
+        mu_filters[:,mu] = np.sum(extended_data[:,discharge_times[:,mu]],axis=1)
+
+
+
+def get_online_parameters(data, rejected_channels, mu_filters, chans_per_grid, fsamp,g):
+
+    # channel rejection again, but on the PRE-FILTERED data
+    # OR: if filtering was not used in the pre processing, the batched data could be used (?)
+    data_slice = data[chans_per_grid[g]*(g):(g+1)* chans_per_grid[g],:] # will need to be generalised
+    rejected_channels_slice = rejected_channels[g] == 1
+    cleaned_data = np.delete(data_slice, rejected_channels_slice, 0)
+
+    # get the first estimate of pulse trains using the previously derived mu filters, applied to the emg data
+    ext_factor = int(np.round(1500/np.shape(cleaned_data)[0]))
+    extended_data = np.zeros([1, np.shape(cleaned_data)[0]*(ext_factor), np.shape(cleaned_data)[1] + ext_factor -1]) # no differential mode used here (?)
+    extended_data =  extend_emg(extended_data,cleaned_data,ext_factor)
+
+    # get inverted version
+    inv_extended_data = np.linalg.pinv(extended_data)
+    
+    # initialisations for extracting pulse trains and centroids in clustering
+    mu_count =  np.shape(mu_filters)[1]
+    pulse_trains = np.zeros([mu_count, np.shape(data)[1]]) 
+    discharge_times = [None] * mu_count # do not know size yet, so can only predefine as a list
+    norm = np.zeros[mu_count]
+    centroids = np.zeros[mu_count,2] # first column is the spike centroids, second column is the noise centroids
+    
+    for mu in range(mu_count):
+
+        pulse_temp = (mu_filters[:,mu].T @ inv_extended_data) @ extended_data # what does this do?
+        # step 4a 
+        pulse_trains = pulse_temp[:np.shape(data)[1]]
+        # source_pred = np.dot(np.transpose(w_n), Z).real # element-wise square of the input to estimate the ith source
+        pulse_trains = np.multiply(pulse_trains,abs(pulse_trains)) # keep the negatives 
+        # Step 4b:
+        peaks, _ = scipy.signal.find_peaks(np.squeeze(pulse_trains), distance = np.round(fsamp*0.02)+1) # peaks variable holds the indices of all peaks
+    
+        if len(peaks) > 1:
+
+            kmeans = KMeans(n_clusters = 2, init = 'k-means++',n_init = 1).fit(pulse_trains[mu,peaks].reshape(-1,1)) # two classes: 1) spikes 2) noise
+            # need both spikes and noise to determine cluster centres for the online decomposition
+            # spikes
+            spikes_ind = np.argmax(kmeans.cluster_centers_)
+            spikes = peaks[np.where(kmeans.labels_ == spikes_ind)]
+            spikes = spikes[pulse_trains[spikes] <= np.mean(pulse_trains[spikes]) + 3*np.std(pulse_trains[spikes])]
+            # noise
+            noise_ind = np.argmin(kmeans.cluster_centers)
+            noise = peaks[np.where(kmeans.labels_ == noise_ind)]
+            norm[mu] = maxk(pulse_trains[spikes], 10)
+            pulse_trains = pulse_trains/norm[mu]
+            centroids[mu,0] = KMeans(n_clusters = 1, init = 'k-means++',n_init = 1).fit(pulse_trains[spikes].reshape(-1,1)).cluster_centers
+            centroids[mu,1] = KMeans(n_clusters = 1, init = 'k-means++',n_init = 1).fit(pulse_trains[noise].reshape(-1,1)).cluster_centers
+
+    return ext_factor, inv_extended_data, norm, centroids
+
+
+
+
+# FOR POST PROCESSING DURING OFFLINE PROCEDURES
 def batch_process_filters(whit_sig, mu_filters,plateau,extender,diff,orig_sig_size,fsamp):
 
     """ dis_time: the distribution of spiking times for every identified motor unit, but at this point we don't check to see
@@ -495,13 +625,12 @@ def batch_process_filters(whit_sig, mu_filters,plateau,extender,diff,orig_sig_si
     return pulse_trains, discharge_times
 
 
-def remove_duplicates(pulse_trains, discharge_times, discharge_times2, maxlag, jitter_val, tol, fsamp):
+def remove_duplicates(pulse_trains, discharge_times, discharge_times2, mu_filters, maxlag, jitter_val, tol, fsamp):
 
     jitter_thr = int(np.round(jitter_val*fsamp))
     spike_trains = np.zeros([np.shape(pulse_trains)[0],np.shape(pulse_trains)[1]])
     # generating binary spike trains for each MU extracted so far
 
-   
     discharge_jits = []
     discharge_times_new = [] # do not know yet how many non-duplicates MUs there will be
     pulse_trains_new = [] # do not know yet how many non-duplicates MUs there will be
@@ -587,11 +716,12 @@ def remove_duplicates(pulse_trains, discharge_times, discharge_times2, maxlag, j
         # all duplicates removed so we identify different duplicate groups on the next iteration of the while loop
         spike_trains = np.delete(spike_trains, duplicates, axis=0)
         pulse_trains = np.delete(pulse_trains, duplicates, axis=0)
+        mu_filters = np.delete(mu_filters,duplicates,axis=0)
 
         i += 1
 
     print('Duplicates removed')
-    return discharge_times_new, pulse_trains_new
+    return discharge_times_new, pulse_trains_new, mu_filters
   
 
 def remove_outliers(pulse_trains, discharge_times, fsamp, threshold = 0.4, max_its = 30):

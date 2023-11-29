@@ -7,6 +7,7 @@ from processing_tools import *
 import tkinter as tk
 from tkinter import simpledialog
 from scipy import signal
+import pickle
 import time
 root = tk.Tk() # Initialising for GUI
 np.random.seed(1337) # Fixes random generation to get same results each time the script is run
@@ -31,7 +32,8 @@ class EMG():
         self.cov_filter = 1
         self.dup_thr = 0.3 # Correlation threshold for defining a pair of spike trains as derived from the same MU, hence a duplicate
         self.refine_mu = 1
-        self.dup_bgrids = 1
+        self.dup_bgrids = 0
+
 #######################################################################################################
 ########################################## OFFLINE EMG ################################################
 #######################################################################################################
@@ -43,6 +45,43 @@ class offline_EMG(EMG):
         super().__init__()
         self.save_dir = save_dir # directory at which final discharges will be saved
         self.to_filter = to_filter # whether or not you notch and butter filter the 
+
+    def open_pickle(self,inputfile):
+
+        # this is the file opening type that is compatible with the GUI
+        with open(inputfile, 'rb') as file:
+            all_data = pickle.load(file)
+
+        # get sampling frequency, no. bits of AD converter, no. channels, grid names and muscle names
+        fsamp = all_data['fsamp']
+        gridemg_data = all_data['allEMG']
+        needleemg_data = all_data['allEMG']
+        nADbit = 16
+        nchans = all_data['nchans']
+        ngrids = all_data['ngrids']
+        nneedles = all_data['nneedles']
+        gridmuscle_names = all_data['muscle_names'][0:nneedles] # assuming that they will be in the correct order
+        needlemuscle_names = all_data['muscle_names'][nneedles:]
+        
+        # read and convert EMG trial data
+        emg_data = all_data['allEMG']
+        emg_data = emg_data.astype(float)
+        # convert the data from bits to microvolts
+        for i in range(nchans):
+            emg_data[i,:] = ((np.dot(emg_data[i,:],5000))/(2**float(nADbit))) # np.dot is faster than *
+
+
+        # read and convert force trial data
+        aux_data = all_data['allFORCE']
+        # assume that the path is the first channel of the aux data
+        path = aux_data[0,:]
+        # target path stored separately
+        target = all_data['target']
+
+        self.signal_dict = signal
+        self.decomp_dict = {} # initialising this dictionary here for later use
+        self.mu_dict = dict(pulse_trains = [], discharge_times = [[] for item in range(1)])# initialising a dictionary that is an empty nested list
+
 
     
     def open_otb(self, inputfile):
@@ -120,149 +159,20 @@ class offline_EMG(EMG):
         self.mu_dict = dict(pulse_trains = [], discharge_times = [[] for item in range(1)])# initialising a dictionary that is an empty nested list
 
         return
-
-    # updated opening of otb files to accommodate for parsing of the file into surface and intramuscular types
-    def open_otb_multi(self, input_file):
-
-        """ Opens data irrespective of recording modality, and parses the data array + parameters into intramusuclar versus high density surface EMG"""
-
-        file_name = input_file.split('/')[1]
-        temp_dir = os.path.join(self.save_dir, 'temp_tarholder')
-        print(temp_dir)
-
-        # make a temporary directory to store the data of the otb file if it doesn't exist yet
-        if not os.path.isdir(temp_dir):
-            os.mkdir(temp_dir)
-
-        # Open the .tar file and extract all data
-        with tf.open(input_file, 'r') as emg_tar:
-            emg_tar.extractall(temp_dir)
-
-        #os.chdir(temp_dir)
-        sig_files = [f for f in os.listdir(temp_dir) if f.endswith('.sig')]
-        trial_label_sig = sig_files[0]  # only one .sig so can be used to get the trial name (0 index list->string)
-        trial_label_xml = trial_label_sig.split('.')[0] + '.xml'
-        trial_label_sig = os.path.join(temp_dir, trial_label_sig)
-        trial_label_xml = os.path.join(temp_dir, trial_label_xml)
-
-        # read the contents of the trial xml file
-        with open(trial_label_xml, encoding='utf-8') as file:
-            xml=ET.fromstring(file.read())
-
-        # get sampling frequency, no. bits of AD converter, no. channels, grid names and muscle names
-        fsamp = int(xml.find('.').attrib['SampleFrequency'])
-        nADbit = int(xml.find('.').attrib['ad_bits'])
-        nchans = int(xml.find('.').attrib['DeviceTotalChannels'])
-        recording_names = [child[0].attrib['ID'] for child in xml.find('./Channels')]  # the channel description is a nested 'child' of the adapter description
-        descriptions = [child[0].attrib['Description'] for child in xml.find('./Channels')]
-        muscle_names = [child[0].attrib['Muscle'] for child in xml.find('./Channels')]
-        todiff_inds = [int(child.attrib['ChannelStartIndex']) for child in xml.find('./Channels')]
-
-        # take a first order difference of t
-
-        # intialise the parsing of intramuscular and high density data
-        grid_names = []
-        grid_sizes = []
-        grid_inds = []
-        intra_names = []
-        intra_sizes = []
-        intra_inds = []
-        nneedles = 0
-        ngrids = 0
-
-        # get the differences between the 
-        recording_sizes = np.diff(todiff_inds)
-
-        # split data into high density and intramuscular types 
-        for ind, des in enumerate(descriptions):
-
-            parsed_description = des.split()
-            parsed_description =  [x.lower() for x in parsed_description]
-            if 'iemg' in parsed_description:
-                nneedles += 1
-                intra_names.append(recording_names[ind])
-                intra_sizes.append(recording_sizes[ind])
-                intra_inds.append(ind)
-            elif 'array' in parsed_description:
-                ngrids += 1
-                grid_names.append(recording_names[ind])
-                grid_sizes.append(recording_sizes[ind])
-                grid_inds.append(ind)
-
-        # read in the EMG trial data
-        emg_data = np.fromfile(open(trial_label_sig),dtype='int'+ str(nADbit)) 
-        emg_data = np.transpose(emg_data.reshape(int(len(emg_data)/nchans),nchans)) # need to reshape because it is read as a stream
-        emg_data = emg_data.astype(float) # needed otherwise you just get an integer from the bits to microvolt division
-
-        # convert the data from bits to microvolts
-        for i in range(nchans):
-            emg_data[i,:] = ((np.dot(emg_data[i,:],5000))/(2**float(nADbit))) # np.dot is faster than *
-
-        # parse the channel data into intramuscular emg and high density surface emg
-        iemg_data = np.asarray([emg_data[todiff_inds[x]:todiff_inds[x+1]] for x in intra_inds])
-        semg_data = np.asarray([emg_data[todiff_inds[x]:todiff_inds[x+1]] for x in grid_inds])
-       
-
-        # squeeze/stack the data into two dimensions instead of three for easier post-processing, if the data type exists
-        data_types = 'both'
-        try:
-            iemg_data = iemg_data.reshape((iemg_data.shape[0]*iemg_data.shape[1]), iemg_data.shape[2])
-        except:
-            print("This dataset does not contain intramusuclar data.")
-            data_types = 'semg'
-        try:
-            semg_data = semg_data.reshape((semg_data.shape[0]*semg_data.shape[1]), semg_data.shape[2])
-        except:
-            print("This dataset does not contain surface data.")
-            data_types = 'iemg'
-
-        print(data_types)
-
-        # creating a dictionary that separately stores data and parameters for intramuscular verrsus high density surface EMG
-        if data_types == 'both':
-            signal = dict(iemg_data = iemg_data, semg_data = semg_data, data = emg_data, fsamp = fsamp, nchans = nchans, nneedles=  nneedles, intra_names = intra_names,\
-                        intra_sizes = intra_sizes, ngrids = ngrids, grid_names = grid_names, grid_sizes = grid_sizes)
-       
-        elif data_types == 'semg':
-            signal = dict(data = semg_data, fsamp = fsamp, nchans = nchans, ngrids = ngrids, grid_names = grid_names, grid_sizes = grid_sizes)
-        
-        else: # when data_types == 'iemg':
-            signal = dict(iemg_data = iemg_data, fsamp = fsamp, nchans = nchans, nneedles=  nneedles, intra_names = intra_names, intra_sizes = intra_sizes)
-
-
-        # if the signals were recorded with a feedback generated by OTBiolab+, get the target and the path performed by the participant
-        if self.ref_exist:
-
-            # only opening the last two .sip files because the first is not needed for analysis
-            # would only need MSE between the participant path (file 2) and the target path (file 3)
-            ######## path #########
-            _, target_label, path_label = glob.glob(f'{temp_dir}/*.sip')
-            with open(path_label) as file:
-                path = np.fromfile(file, dtype='float64')
-                path = path[:np.shape(emg_data)[1]]
-            ######## target ########
-            with open(target_label) as file:
-                target = np.fromfile(file,dtype='float64')
-                target = target[:np.shape(emg_data)[1]]
-            
-            signal['path'] = path
-            signal['target'] = target
-
-        # delete the temp_tarholder directory since everything we need has been taken out of it
-        for file_name in os.listdir(temp_dir):
-            file = os.path.join(temp_dir, file_name)
-            if os.path.isfile(file):
-                os.remove(file)
-
-        os.rmdir(temp_dir)
-        self.signal_dict = signal
-        self.decomp_dict = {} # initialising this dictionary here for later use
-        self.mu_dict = dict(pulse_trains = [], discharge_times = [[] for item in range(1)])# initialising a dictionary that is an empty nested list
-
-        return
-        
-
     
+    def intramuscular_formatter(self):
+
+        electroe_names = self.signal_dict['needles']
+        ElChannelMap = []
+        coordinates = []
+        IED = []
+        c_map = []
+        r_map = []
+        rejected_channels = []
+        chans_per_grid = []
+        self.signal_dict['filtered_data'] = np.zeros([np.shape(self.signal_dict['data'])[0],np.shape(self.signal_dict['data'])[1]])
+
+        
     def grid_formatter(self):
 
         """ Match up the signals with the grid shape and numbering """
@@ -368,8 +278,6 @@ class offline_EMG(EMG):
 
                 rejected_channels.apppend(np.zeros([40]))
                 IED.append(1)
-
-            #elif grid_names[i] == ''
             
             ElChannelMap[i] = np.squeeze(np.array(ElChannelMap[i]))
             chans_per_grid.append((np.shape(ElChannelMap[i])[0] * np.shape(ElChannelMap[i])[1]) - 1)
@@ -389,8 +297,6 @@ class offline_EMG(EMG):
             self.signal_dict['filtered_data'][chans_per_grid[i]*(grid-1):grid*chans_per_grid[i],:] = notch_filter(self.signal_dict['data'][chans_per_grid[i]*(grid-1):grid*chans_per_grid[i],:],self.signal_dict['fsamp'])
             
             self.signal_dict['filtered_data'][chans_per_grid[i]*(grid-1):grid*chans_per_grid[i],:] = bandpass_filter(self.signal_dict['filtered_data'][chans_per_grid[i]*(grid-1):grid*chans_per_grid[i],:],self.signal_dict['fsamp'],emg_type = 'surface')        
-
-        
         self.c_maps = c_map
         self.r_maps = r_map
         self.rejected_channels = rejected_channels
@@ -578,7 +484,7 @@ class offline_EMG(EMG):
         
 ######################### FAST ICA AND CONVOLUTIVE KERNEL COMPENSATION  ############################################
 
-    def fast_ICA_and_CKC(self,g,interval,tracker,cf_type = 'logcosh'):
+    def fast_ICA_and_CKC(self,g,interval,tracker,cf_type = 'square'):
 
         
         init_its = np.zeros([self.its],dtype=int) # tracker of initialisaitons of separation vectors across iterations
@@ -594,7 +500,6 @@ class offline_EMG(EMG):
         time_axis = np.linspace(0,np.shape(Z)[1],np.shape(Z)[1])/self.signal_dict['fsamp']  # create a time axis for spiking activity
 
         # choosing contrast function here, avoid repetitively choosing within the iteration loop
-
         if cf_type == 'square':
             cf = square
             dot_cf = dot_square
@@ -715,7 +620,9 @@ class offline_EMG(EMG):
             
             self.mus_in_array[grid-1] = 1 # if pulse trains were not extracted for this grid, then it remains at a value of 0
             # removing duplicate MUs
-            discharge_times_new, pulse_trains_new =  remove_duplicates(pulse_trains, discharge_times,discharge_times,np.round(self.signal_dict['fsamp']/40),0.00025, self.dup_thr, self.signal_dict['fsamp'])
+            discharge_times_new, pulse_trains_new, mu_filters_new =  remove_duplicates(pulse_trains, discharge_times,discharge_times,np.squeeze(self.decomp_dict['masked_mu_filters']),np.round(self.signal_dict['fsamp']/40),0.00025, self.dup_thr, self.signal_dict['fsamp'])
+            self.decomp_dict['masked_mu_filters'] = []
+            self.decomp_dict['masked_mu_filters'] = mu_filters_new
 
             if self.refine_mu:
                 # removing outliers generating irrelvant discharge rates before manual edition (1st time)
@@ -733,6 +640,46 @@ class offline_EMG(EMG):
         for j in range(len(discharge_times_new)):
 
             self.mu_dict['discharge_times'][grid-1].append(discharge_times_new[j])
+
+
+    def post_process_EMG_for_biofeedback(self,grid,interval):
+
+        self.mus_in_array = np.zeros(self.signal_dict['ngrids'])
+        grid += 1
+        self.decomp_dict['masked_mu_filters'] =  self.decomp_dict['dewhiten_mat'][interval] @ self.decomp_dict['masked_mu_filters']
+        # get the pulse train for the entire signal
+
+        pulse_trains, discharge_times, _ = get_pulse_trains(self.signal_dict['data'], self.rejected_channels, self.decomp_dict['masked_mu_filters'], self.chans_per_grid, self.signal_dict['fsamp'],grid-1)
+      
+        if np.shape(pulse_trains)[0] > 0: # if there are existing MUs
+            
+            self.mus_in_array[grid-1] = 1 # if pulse trains were not extracted for this grid, then it remains at a value of 0
+           
+            # removing duplicate MUs
+            discharge_times_new, _ , _ =  remove_duplicates(pulse_trains, discharge_times,discharge_times,np.squeeze(self.decomp_dict['masked_mu_filters']),np.round(self.signal_dict['fsamp']/40),0.00025, self.dup_thr, self.signal_dict['fsamp'])
+            del pulse_trains, discharge_times
+
+            # get the decomposition parameters for the biofeedback
+            new_mu_filters = get_mu_filters(self.signal_dict['data'],self.rejected_channels, discharge_times_new, self.chans_per_grid, grid-1)
+
+            # find the pulse trains again
+            pulse_trains, discharge_times, _ = get_pulse_trains(self.signal_dict['data'], self.rejected_channels, self.decomp_dict['masked_mu_filters'], self.chans_per_grid, self.signal_dict['fsamp'],grid-1)
+
+            # get online parameters
+            _ , inv_extended_data, norm, centroids =  get_online_parameters(self.signal_dict['data'], self.rejected_channels, new_mu_filters, self.chans_per_grid, self.signal_dict['fsamp'],grid-1)
+
+            self.mu_dict['pulse_trains'].append(pulse_trains)
+            self.mu_dict['inv_extended_data'].append(inv_extended_data)
+            self.mu_dict['norm'].append(norm)
+            self.mu_dict['centroids'].append(centroids)
+            self.mu_dict['mu_filters'].append(new_mu_filters)
+            
+        if grid != 1:
+            self.mu_dict['discharge_times'].append([])
+
+        for j in range(len(discharge_times)):
+
+            self.mu_dict['discharge_times'][grid-1].append(discharge_times[j])
 
     def post_process_across_arrays(self):
 
@@ -786,9 +733,3 @@ class offline_EMG(EMG):
 
         
     
-
-            
-            
-        
-
-
