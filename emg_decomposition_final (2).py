@@ -98,7 +98,7 @@ class offline_EMG(EMG):
             # only opening the last two .sip files because the first is not needed for analysis
             # would only need MSE between the participant path (file 2) and the target path (file 3)
             ######## path #########
-            _, target_label, path_label = glob.glob(f'{temp_dir}/*.sip')
+            _, target_label, path_label = sorted(glob.glob(f'{temp_dir}/*.sip'))
             with open(path_label) as file:
                 path = np.fromfile(file, dtype='float64')
                 path = path[:np.shape(emg_data)[1]]
